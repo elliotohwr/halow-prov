@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HaLow 프로비저닝</title>
+<style>
+:root{--bg:#fff;--fg:#1f2328;--mut:#666;--line:#ddd;--acc:#1565c0;--ok:#2e7d32;--err:#c62828;--card:#f6f8fa}
+@media (prefers-color-scheme:dark){:root{--bg:#16181b;--fg:#e6e6e6;--mut:#9aa0a6;--line:#333;--acc:#64b5f6;--ok:#81c784;--err:#ef9a9a;--card:#1f2226}}
+body{font-family:system-ui,'Malgun Gothic',sans-serif;margin:0;padding:16px;background:var(--bg);color:var(--fg);max-width:640px}
+h1{font-size:20px;margin:0 0 4px}.mut{color:var(--mut);font-size:13px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0}
+h2{font-size:16px;margin:0 0 8px}
+button{font-size:16px;padding:10px 14px;border-radius:8px;border:1px solid var(--acc);background:var(--acc);color:#fff;margin:4px 4px 4px 0}
+button.sec{background:transparent;color:var(--acc)}button:disabled{opacity:.4}
+input{font-size:16px;padding:9px;border:1px solid var(--line);border-radius:8px;width:100%;box-sizing:border-box;background:var(--bg);color:var(--fg)}
+.ap{display:flex;justify-content:space-between;padding:10px;border:1px solid var(--line);border-radius:8px;margin:6px 0;cursor:pointer}
+.ap.sel{border-color:var(--acc);border-width:2px}
+.ok{color:var(--ok);font-weight:600}.err{color:var(--err);font-weight:600}
+#log{font-family:monospace;font-size:11px;white-space:pre-wrap;max-height:220px;overflow:auto;color:var(--mut)}
+.hide{display:none}
+table{border-collapse:collapse;width:100%;font-size:14px}td{padding:4px 6px;border-bottom:1px solid var(--line)}
+</style></head><body>
+<h1>HaLow 프로비저닝</h1>
+<div class="mut">NRC7394 HaLow 기기를 BLE로 HaLow AP에 연결합니다 (IS-1260, 프레임 정의 v1)</div>
+
+<section id="s1"><h2>1. 기기 찾기</h2>
+<button id="bFind">BLE로 기기 찾기</button>
+<div id="devInfo" class="mut"></div></section>
+
+<section id="s2" class="hide"><h2>2. 기기 확인</h2>
+<div class="mut">설치 코드: 8자리 PIN 또는 11자리 수동 코드</div>
+<input id="code" inputmode="numeric" placeholder="예: 20202021 또는 3497-011-2332" value="">
+<button id="bAuth">확인</button>
+<div id="authInfo"></div></section>
+
+<section id="s3" class="hide"><h2>3. HaLow AP 선택</h2>
+<button id="bScan">HaLow 스캔</button><span id="scanInfo" class="mut"></span>
+<div id="aps"></div>
+<div id="pwBox" class="hide"><div class="mut" id="selName"></div>
+<input id="pw" type="password" placeholder="HaLow AP 암호" autocomplete="off">
+<button id="bConn">접속</button></div></section>
+
+<section id="s4" class="hide"><h2>4. 결과</h2>
+<div id="stat"></div>
+<table id="statTbl"></table>
+<button id="bFinish" disabled>완료 (BLE 끊기)</button></section>
+
+<section id="s5" class="hide"><h2>5. 다음</h2>
+<div>기기가 HaLow 망에 붙었고 Matter 커미셔닝 창이 열려 있습니다.</div>
+<ul><li><b>A. 상용 앱</b>: 구글 홈 / Apple 홈에서 기기 QR 또는 수동 코드로 추가 (같은 망에서)</li>
+<li><b>B. 직접 커미셔닝</b>: 정식 앱에서 (준비 중)</li></ul></section>
+
+<section><h2>로그</h2><div id="log"></div></section>
+
+<script>
+'use strict';
+const SVC='4e524301-7072-6f76-0001-4e5243484c57', RX='4e524301-7072-6f76-0002-4e5243484c57', TX='4e524301-7072-6f76-0003-4e5243484c57';
+const OP={HELLO:1,AUTH:2,SCAN:3,CONNECT:4,STATUS:5,FINISH:6,HELLO_RSP:0x81,AUTH_RSP:0x82,SCAN_ITEM:0x83,SCAN_DONE:0x84,CONNECT_RSP:0x85,STATUS_EVT:0x86,FINISH_RSP:0x87,ERROR:0xFF};
+const ST=['OK','인증 전','설치 코드 틀림','바쁨 (잠시 후)','잘못된 값','AP 안 보임','HaLow 암호 틀림','시간 초과','지금 받을 수 없음 (이미 커미셔닝된 기기)','잠김 (60초 뒤 다시)'];
+const SEC=['개방','WPA2','WPA3-SAE','OWE'];
+const $=id=>document.getElementById(id);
+const enc=new TextEncoder(), dec=new TextDecoder();
+let dev,rx,tx,tid=0,waiters={},nonceA,nonceD,hello,kMac,kEnc,aps=[],selAp=null;
+
+function log(s){const l=$('log');l.textContent+=new Date().toTimeString().slice(0,8)+' '+s+'\n';l.scrollTop=l.scrollHeight;}
+const hex=b=>Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
+const cat=(...a)=>{const n=a.reduce((s,x)=>s+x.length,0),o=new Uint8Array(n);let p=0;for(const x of a){o.set(x,p);p+=x.length;}return o;};
+const show=(id,on=true)=>$(id).classList.toggle('hide',!on);
+
+// ---------- BLE
+$('bFind').onclick=async()=>{
+  try{
+    if(!navigator.bluetooth){alert('이 브라우저는 BLE(Web Bluetooth)를 지원하지 않습니다.\n안드로이드: Chrome, iPad: Bluefy 브라우저를 쓰세요.');return;}
+    dev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'NRC-'},{services:[SVC]}],optionalServices:[SVC]});
+    dev.addEventListener('gattserverdisconnected',()=>{log('BLE 끊김');$('devInfo').innerHTML+=' · <span class="err">끊김</span>';});
+    log('연결 중: '+dev.name);
+    const srv=await dev.gatt.connect();
+    const s=await srv.getPrimaryService(SVC);
+    rx=await s.getCharacteristic(RX); tx=await s.getCharacteristic(TX);
+    tx.addEventListener('characteristicvaluechanged',e=>onMsg(new Uint8Array(e.target.value.buffer)));
+    await tx.startNotifications();
+    log('연결됨, P_TX 구독');
+    nonceA=crypto.getRandomValues(new Uint8Array(16));
+    const r=await req(OP.HELLO,nonceA,OP.HELLO_RSP);
+    if(r[0]!==0){$('devInfo').innerHTML=`<span class="err">${dev.name}: ${ST[r[0]]||r[0]}</span>`;return;}
+    let p=2; nonceD=r.slice(p,p+16);p+=16; const sl=r[p++]; const salt=r.slice(p,p+sl);p+=sl;
+    const dv=new DataView(r.buffer,r.byteOffset); const iter=dv.getUint32(p,true);p+=4;
+    const state=r[p++], disc=dv.getUint16(p,true), vid=dv.getUint16(p+2,true), pid=dv.getUint16(p+4,true);
+    hello={salt,iter,state,disc,vid,pid};
+    $('devInfo').innerHTML=`<span class="ok">${dev.name}</span> · discriminator ${disc} · VID 0x${vid.toString(16)} PID 0x${pid.toString(16)}<br>`+
+      `HaLow 망 ${state&1?'저장됨':'없음'} · 지금 ${state&4?'접속 중':'미접속'}`;
+    show('s2');
+  }catch(e){log('오류: '+e);alert(e);}
+};
+
+function send(op,body){const t=(++tid)&0xFF;const m=cat(new Uint8Array([1,op,t]),body||new Uint8Array());log('→ '+op.toString(16)+' '+hex(m).slice(0,80));return rx.writeValueWithResponse(m).then(()=>t);}
+function req(op,body,rop,timeout=10000){return new Promise(async(res,rej)=>{const t=await send(op,body);const to=setTimeout(()=>{delete waiters[rop];rej('응답 없음 (op 0x'+rop.toString(16)+')');},timeout);waiters[rop]=b=>{clearTimeout(to);res(b);};});}
+function onMsg(m){
+  log('← '+hex(m).slice(0,90));
+  if(m.length<3||m[0]!==1)return;
+  const op=m[1],b=m.slice(3);
+  if(op===OP.SCAN_ITEM)return onScanItem(b);
+  if(op===OP.SCAN_DONE)return onScanDone(b);
+  if(op===OP.STATUS_EVT)return onStatus(b);
+  if(op===OP.ERROR){log('기기 오류: op 0x'+b[1].toString(16)+' '+(ST[b[0]]||b[0]));alert('기기 오류: '+(ST[b[0]]||b[0]));return;}
+  const w=waiters[op]; if(w){delete waiters[op];w(b);}
+}
+
+// ---------- crypto (key from setup passcode, as frame spec v1 section 5)
+const P256N=0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+function parseCode(s){
+  const d=s.replace(/[^0-9]/g,'');
+  if(d.length===8)return Number(d);
+  if(d.length===11||d.length===21){ // manual pairing code: chunk1(1) chunk2(5) chunk3(4) check(1)
+    const c2=Number(d.slice(1,6)),c3=Number(d.slice(6,10));
+    return (c2&0x3FFF)|(c3<<14);
+  }
+  throw '설치 코드는 8자리 PIN 또는 11자리 수동 코드입니다';
+}
+async function deriveKeys(pin){
+  const pinLE=new Uint8Array(4);new DataView(pinLE.buffer).setUint32(0,pin,true);
+  const pk=await crypto.subtle.importKey('raw',pinLE,'PBKDF2',false,['deriveBits']);
+  const ws=new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt:hello.salt,iterations:hello.iter},pk,80*8));
+  let w0=BigInt('0x'+hex(ws.slice(0,40)))%P256N;
+  const w0b=new Uint8Array(32);for(let i=31;i>=0;i--){w0b[i]=Number(w0&0xffn);w0>>=8n;}
+  const hk=await crypto.subtle.importKey('raw',w0b,'HKDF',false,['deriveBits']);
+  const okm=new Uint8Array(await crypto.subtle.deriveBits({name:'HKDF',hash:'SHA-256',salt:cat(nonceA,nonceD),info:enc.encode('NRC-PROV v1')},hk,256));
+  kMac=await crypto.subtle.importKey('raw',okm.slice(0,16),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  const ke=okm.slice(16,32);
+  kEnc={cbc:await crypto.subtle.importKey('raw',ke,'AES-CBC',false,['encrypt']),ctr:await crypto.subtle.importKey('raw',ke,'AES-CTR',false,['encrypt'])};
+}
+const mac=async(tag)=>new Uint8Array(await crypto.subtle.sign('HMAC',kMac,cat(enc.encode(tag),nonceA,nonceD))).slice(0,16);
+// AES-128-CCM (RFC 3610), nonce 13 B, tag 8 B, no AAD, via WebCrypto CBC (CBC-MAC) + CTR
+async function ccmEncrypt(nonce,pt){
+  const M=8,L=2;
+  const b0=cat(new Uint8Array([((M-2)/2)<<3|(L-1)]),nonce,new Uint8Array([pt.length>>8,pt.length&0xff]));
+  const pad=new Uint8Array(Math.ceil(pt.length/16)*16);pad.set(pt);
+  const cbc=new Uint8Array(await crypto.subtle.encrypt({name:'AES-CBC',iv:new Uint8Array(16)},kEnc.cbc,cat(b0,pad)));
+  const nb=1+pad.length/16, T=cbc.slice((nb-1)*16,(nb-1)*16+M);
+  const a=i=>cat(new Uint8Array([L-1]),nonce,new Uint8Array([i>>8,i&0xff]));
+  const ctr=async(blk,data)=>new Uint8Array(await crypto.subtle.encrypt({name:'AES-CTR',counter:blk,length:16},kEnc.ctr,data));
+  const c=await ctr(a(1),pt), s0=await ctr(a(0),new Uint8Array(16));
+  const U=T.map((x,i)=>x^s0[i]);
+  return cat(c,U);
+}
+
+$('bAuth').onclick=async()=>{
+  try{
+    const pin=parseCode($('code').value);
+    $('authInfo').textContent='계산 중...';
+    await deriveKeys(pin);
+    const r=await req(OP.AUTH,await mac('A'),OP.AUTH_RSP);
+    if(r[0]!==0){$('authInfo').innerHTML=`<span class="err">${ST[r[0]]||r[0]}</span>`;return;}
+    const want=await mac('D');
+    if(hex(r.slice(1,17))!==hex(want)){$('authInfo').innerHTML='<span class="err">기기 응답이 맞지 않습니다 (다른 기기?)</span>';return;}
+    $('authInfo').innerHTML='<span class="ok">확인됨 (양쪽 인증)</span>';
+    show('s3');
+  }catch(e){$('authInfo').innerHTML=`<span class="err">${e}</span>`;log('오류: '+e);}
+};
+
+// ---------- scan / connect
+$('bScan').onclick=async()=>{aps=[];selAp=null;$('aps').innerHTML='';show('pwBox',false);$('scanInfo').textContent=' 스캔 중 (최대 20초)...';await send(OP.SCAN);};
+function onScanItem(b){
+  const dv=new DataView(b.buffer,b.byteOffset);
+  const ap={rssi:dv.getInt8(1),ch:dv.getUint16(2,true),sec:b[4],bssid:b.slice(5,11),ssid:dec.decode(b.slice(12,12+b[11])),ssidRaw:b.slice(12,12+b[11])};
+  aps.push(ap);
+}
+function onScanDone(b){
+  $('scanInfo').textContent=b[0]===0?` ${b[1]}개`:` ${ST[b[0]]||b[0]}`;
+  aps.sort((x,y)=>y.rssi-x.rssi);
+  $('aps').innerHTML='';
+  aps.forEach((ap,i)=>{const d=document.createElement('div');d.className='ap';
+    d.innerHTML=`<span><b>${ap.ssid.replace(/</g,'&lt;')||'(숨김)'}</b><br><span class="mut">${hex(ap.bssid).match(/../g).join(':')} · ch ${ap.ch}</span></span><span>${ap.rssi} dBm<br><span class="mut">${SEC[ap.sec]||ap.sec}</span></span>`;
+    d.onclick=()=>{document.querySelectorAll('.ap').forEach(x=>x.classList.remove('sel'));d.classList.add('sel');selAp=ap;$('selName').textContent='선택: '+ap.ssid+' ('+(SEC[ap.sec]||'')+')';show('pwBox');$('pw').focus();};
+    $('aps').appendChild(d);});
+}
+$('bConn').onclick=async()=>{
+  if(!selAp)return;
+  const pw=enc.encode($('pw').value);
+  if(pw.length>64){alert('암호는 64바이트까지');return;}
+  const pt=cat(new Uint8Array([selAp.ssidRaw.length]),selAp.ssidRaw,new Uint8Array([pw.length]),pw);
+  const iv=crypto.getRandomValues(new Uint8Array(8));
+  const ct=await ccmEncrypt(cat(iv,new Uint8Array(5)),pt);
+  show('s4');$('stat').innerHTML='접속 요청...';$('statTbl').innerHTML='';
+  const r=await req(OP.CONNECT,cat(iv,ct),OP.CONNECT_RSP);
+  if(r[0]!==0)$('stat').innerHTML=`<span class="err">접속 요청 거절: ${ST[r[0]]||r[0]}</span>`;
+};
+function onStatus(b){
+  const dv=new DataView(b.buffer,b.byteOffset);
+  const status=b[0],state=b[1],rssi=dv.getInt8(2),ch=dv.getUint16(3,true),bssid=b.slice(5,11),ip=Array.from(b.slice(11,15)).join('.'),ssid=dec.decode(b.slice(16,16+b[15]));
+  const S=['대기','접속 중...','접속됨','실패'];
+  $('stat').innerHTML=state===2?`<span class="ok">접속됨: ${ssid}</span>`:state===3?`<span class="err">실패: ${ST[status]||status}</span>`:S[state];
+  if(state===2){$('statTbl').innerHTML=`<tr><td>SSID</td><td>${ssid}</td></tr><tr><td>IPv4</td><td>${ip}</td></tr><tr><td>BSSID</td><td>${hex(bssid).match(/../g).join(':')}</td></tr><tr><td>채널</td><td>${ch}</td></tr><tr><td>RSSI</td><td>${rssi} dBm</td></tr>`;$('bFinish').disabled=false;}
+}
+$('bFinish').onclick=async()=>{try{await req(OP.FINISH,null,OP.FINISH_RSP);}catch(e){log(e);}show('s5');};
+</script>
+</body></html>
