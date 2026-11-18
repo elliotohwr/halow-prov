@@ -19,7 +19,7 @@ input{font-size:16px;padding:9px;border:1px solid var(--line);border-radius:8px;
 table{border-collapse:collapse;width:100%;font-size:14px}td{padding:4px 6px;border-bottom:1px solid var(--line)}
 </style></head><body>
 <h1>HaLow 프로비저닝</h1>
-<div class="mut">NRC7394 HaLow 기기를 BLE로 HaLow AP에 연결합니다 (IS-1260, 프레임 정의 v1)</div>
+<div class="mut">NRC7394 HaLow 기기를 BLE로 HaLow AP에 연결합니다 (IS-1260, 프레임 정의 v1, 페이지 261118b)</div>
 
 <section id="s1"><h2>1. 기기 찾기</h2>
 <button id="bFind">BLE로 기기 찾기</button>
@@ -54,7 +54,7 @@ table{border-collapse:collapse;width:100%;font-size:14px}td{padding:4px 6px;bord
 'use strict';
 const SVC='4e524301-7072-6f76-0001-4e5243484c57', RX='4e524301-7072-6f76-0002-4e5243484c57', TX='4e524301-7072-6f76-0003-4e5243484c57';
 const OP={HELLO:1,AUTH:2,SCAN:3,CONNECT:4,STATUS:5,FINISH:6,HELLO_RSP:0x81,AUTH_RSP:0x82,SCAN_ITEM:0x83,SCAN_DONE:0x84,CONNECT_RSP:0x85,STATUS_EVT:0x86,FINISH_RSP:0x87,ERROR:0xFF};
-const ST=['OK','인증 전','설치 코드 틀림','바쁨 (잠시 후)','잘못된 값','AP 안 보임','HaLow 암호 틀림','시간 초과','지금 받을 수 없음 (이미 커미셔닝된 기기)','잠김 (60초 뒤 다시)'];
+const ST=['OK','인증 전','설치 코드 틀림','바쁨 (잠시 후)','잘못된 값','AP 안 보임','HaLow 암호 틀림','시간 초과','지금 받을 수 없음 (이미 커미셔닝된 기기)','잠김 (60초 뒤 다시)','AP에는 붙었지만 IP 주소를 못 받음 (DHCP 없음: AP의 유선망/공유기 확인)'];
 const SEC=['개방','WPA2','WPA3-SAE','OWE'];
 const $=id=>document.getElementById(id);
 const enc=new TextEncoder(), dec=new TextDecoder();
@@ -188,6 +188,9 @@ function onStatus(b){
   const status=b[0],state=b[1],rssi=dv.getInt8(2),ch=dv.getUint16(3,true),bssid=b.slice(5,11),ip=Array.from(b.slice(11,15)).join('.'),ssid=dec.decode(b.slice(16,16+b[15]));
   const S=['대기','접속 중...','접속됨','실패'];
   $('stat').innerHTML=state===2?`<span class="ok">접속됨: ${ssid}</span>`:state===3?`<span class="err">실패: ${ST[status]||status}</span>`:S[state];
+  if(state===3){$('bFinish').disabled=true;
+    $('stat').innerHTML+='<br><span class="mut">위 목록에서 다른 AP를 고르거나 다시 스캔하세요 (BLE 연결은 유지됩니다)</span>';
+    if(status===10)$('statTbl').innerHTML=`<tr><td>SSID</td><td>${ssid}</td></tr><tr><td>IPv4</td><td class="err">없음</td></tr><tr><td>BSSID</td><td>${hex(bssid).match(/../g).join(':')}</td></tr><tr><td>채널</td><td>${ch}</td></tr><tr><td>RSSI</td><td>${rssi} dBm</td></tr>`;}
   if(state===2){$('statTbl').innerHTML=`<tr><td>SSID</td><td>${ssid}</td></tr><tr><td>IPv4</td><td>${ip}</td></tr><tr><td>BSSID</td><td>${hex(bssid).match(/../g).join(':')}</td></tr><tr><td>채널</td><td>${ch}</td></tr><tr><td>RSSI</td><td>${rssi} dBm</td></tr>`;$('bFinish').disabled=false;}
 }
 $('bFinish').onclick=async()=>{try{await req(OP.FINISH,null,OP.FINISH_RSP);}catch(e){log(e);}show('s5');};
