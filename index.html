@@ -19,7 +19,7 @@ input{font-size:16px;padding:9px;border:1px solid var(--line);border-radius:8px;
 table{border-collapse:collapse;width:100%;font-size:14px}td{padding:4px 6px;border-bottom:1px solid var(--line)}
 </style></head><body>
 <h1>HaLow 프로비저닝</h1>
-<div class="mut">NRC7394 HaLow 기기를 BLE로 HaLow AP에 연결합니다 (IS-1260, 프레임 정의 v1, 페이지 261118b)</div>
+<div class="mut">NRC7394 HaLow 기기를 BLE로 HaLow AP에 연결합니다 (IS-1260, 프레임 정의 v1, 페이지 261119a)</div>
 
 <section id="s1"><h2>1. 기기 찾기</h2>
 <button id="bFind">BLE로 기기 찾기</button>
@@ -92,7 +92,8 @@ $('bFind').onclick=async()=>{
 };
 
 function send(op,body){const t=(++tid)&0xFF;const m=cat(new Uint8Array([1,op,t]),body||new Uint8Array());log('→ '+op.toString(16)+' '+hex(m).slice(0,80));return rx.writeValueWithResponse(m).then(()=>t);}
-function req(op,body,rop,timeout=10000){return new Promise(async(res,rej)=>{const t=await send(op,body);const to=setTimeout(()=>{delete waiters[rop];rej('응답 없음 (op 0x'+rop.toString(16)+')');},timeout);waiters[rop]=b=>{clearTimeout(to);res(b);};});}
+// 261119a: register the waiter BEFORE sending. Over the SPI link the device's notify can arrive before writeValueWithResponse() resolves; the old order dropped that response ("응답 없음" ~20% at AUTH).
+function req(op,body,rop,timeout=10000){return new Promise((res,rej)=>{let w;const to=setTimeout(()=>{if(waiters[rop]===w)delete waiters[rop];rej('응답 없음 (op 0x'+rop.toString(16)+')');},timeout);w=b=>{clearTimeout(to);res(b);};waiters[rop]=w;send(op,body).catch(e=>{clearTimeout(to);if(waiters[rop]===w)delete waiters[rop];rej(e);});});}
 function onMsg(m){
   log('← '+hex(m).slice(0,90));
   if(m.length<3||m[0]!==1)return;
